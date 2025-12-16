@@ -1,0 +1,437 @@
+\chapter{Networking Basics}
+
+This chapter builds intuition about how data moves across networks. Understanding these fundamentals is essential for debugging connection issues, designing VPN systems, and interpreting diagnostic information.
+
+\section{OSI Layers in a Nutshell}
+
+The OSI (Open Systems Interconnection) model divides network communication into seven layers. We primarily interact with layers 3--7 when building VPN/proxy systems. The control plane lives in L7, while data plane packets live in L3/L4 tunnels.
+
+\begin{enumerate}
+    \item \textbf{Physical Layer (Layer 1)}: Electrical signals, cables, wireless transmission.
+    \item \textbf{Data Link Layer (Layer 2)}: Ethernet frames, MAC addresses, local network protocols.
+    \item \textbf{Network Layer (Layer 3)}: IP addresses, routing, IP packets.
+    \item \textbf{Transport Layer (Layer 4)}: TCP/UDP, ports, reliability, flow control.
+    \item \textbf{Session Layer (Layer 5)}: Session management, synchronization.
+    \item \textbf{Presentation Layer (Layer 6)}: Data translation, encryption, compression.
+    \item \textbf{Application Layer (Layer 7)}: HTTP, HTTPS, DNS, FTP, application protocols.
+\end{enumerate}
+
+\section{Simple Path Diagram}
+\begin{figure}[h]
+    \centering
+    \begin{tikzpicture}[node distance=2cm,>=stealth,thick]
+        \node (client) [draw, rounded corners] {Client};
+        \node (router) [draw, rounded corners, right of=client] {Router};
+        \node (isp) [draw, rounded corners, right of=router] {ISP};
+        \node (edge) [draw, rounded corners, right of=isp] {Smart Relay Edge};
+        \node (service) [draw, rounded corners, right of=edge] {Service};
+        \draw[->] (client) -- node[above]{Ethernet/Wi-Fi} (router);
+        \draw[->] (router) -- node[above]{IP} (isp);
+        \draw[->] (isp) -- node[above]{Encrypted tunnel} (edge);
+        \draw[->] (edge) -- node[above]{HTTP/QUIC} (service);
+    \end{tikzpicture}
+    \caption{Typical path from client to service via Smart Relay.}
+\end{figure}
+
+\section{Key Terms}
+\begin{itemize}
+    \item \textbf{Latency}: time for a packet to reach the destination.
+    \item \textbf{Throughput}: amount of data moved per unit time.
+    \item \textbf{Jitter}: variation in latency; hurts real-time traffic.
+    \item \textbf{MTU}: maximum packet size before fragmentation.
+\end{itemize}
+
+\section{Addresses and Ports Refresher}
+\begin{itemize}
+    \item IPv4 vs IPv6: plan for dual-stack; IPv6 often less congested.
+    \item NAT traversal matters: STUN/TURN not typical for VPN, but port selection affects reachability.
+    \item Service differentiation: use ports that blend in (443/8443) but avoid obvious fingerprints.
+\end{itemize}
+
+\section{Packet Journey: From Application to Wire}
+
+Understanding how data flows through the network stack helps diagnose issues:
+
+\begin{enumerate}
+    \item \textbf{Application Layer}: Your application (browser, VPN client) creates data.
+    \item \textbf{Transport Layer}: Data is segmented, port numbers added, TCP/UDP headers created.
+    \item \textbf{Network Layer}: IP addresses added, routing decisions made, IP headers created.
+    \item \textbf{Data Link Layer}: MAC addresses added, Ethernet frames created.
+    \item \textbf{Physical Layer}: Electrical signals sent over cable or wireless.
+\end{enumerate}
+
+At each layer, headers are added (encapsulation). When received, headers are removed (decapsulation).
+
+\section{Understanding Connection Failures}
+
+Connection failures can occur at different layers:
+
+\begin{itemize}
+    \item \textbf{DNS Failure (Layer 7)}: Cannot resolve hostname to IP address.
+    \begin{itemize}
+        \item Symptom: "Name or service not known"
+        \item Cause: DNS server unreachable, incorrect hostname, DNS misconfiguration.
+    \end{itemize}
+    
+    \item \textbf{Network Unreachable (Layer 3)}: No route to destination.
+    \begin{itemize}
+        \item Symptom: "Network unreachable", "No route to host"
+        \item Cause: Routing table has no entry, firewall blocking, network misconfiguration.
+    \end{itemize}
+    
+    \item \textbf{Connection Refused (Layer 4)}: Port is closed.
+    \begin{itemize}
+        \item Symptom: "Connection refused", "Connection actively refused"
+        \item Cause: Service not running, firewall blocking port, wrong port number.
+    \end{itemize}
+    
+    \item \textbf{Connection Timeout (Layer 4)}: No response to connection attempt.
+    \begin{itemize}
+        \item Symptom: "Connection timeout", "Operation timed out"
+        \item Cause: Firewall silently dropping packets, network congestion, server down.
+    \end{itemize}
+\end{itemize}
+
+\section{Routing and Packet Forwarding}
+
+When you send a packet, the network stack must decide where to send it:
+
+\begin{enumerate}
+    \item Check if destination is on local network (same subnet).
+    \item If local, send directly using MAC address (ARP).
+    \item If remote, send to default gateway (router).
+    \item Router consults routing table to forward packet.
+    \item Process repeats at each hop until destination reached.
+\end{enumerate}
+
+\textbf{Routing Table Example:}
+\begin{verbatim}
+Destination     Gateway         Interface
+0.0.0.0         192.168.1.1    eth0        # Default route
+192.168.1.0     0.0.0.0        eth0        # Local network
+10.0.0.0        10.0.0.1       tun0        # VPN network
+\end{verbatim}
+
+\section{Firewalls and Packet Filtering}
+
+Firewalls filter packets at different layers:
+
+\begin{itemize}
+    \item \textbf{Packet Filtering (Layer 3-4)}: Filter based on IP addresses and ports.
+    \item \textbf{Stateful Inspection (Layer 4)}: Track connection state, allow established connections.
+    \item \textbf{Application Layer (Layer 7)}: Deep packet inspection, protocol-aware filtering.
+\end{itemize}
+
+\textbf{Firewall Behaviors:}
+\begin{itemize}
+    \item \textbf{Reject}: Send RST packet (connection refused).
+    \item \textbf{Drop}: Silently discard packet (connection timeout).
+    \item \textbf{Accept}: Allow packet through.
+\end{itemize}
+
+Understanding firewall behavior helps interpret connection test results.
+
+\section{Proxy Testing and Troubleshooting}
+
+When testing proxy endpoints, understanding the connection flow helps diagnose issues systematically. This section documents real-world troubleshooting techniques used in Smart Relay.
+
+\subsection{Proxy Connection Flow}
+
+A typical proxy test involves multiple layers:
+
+\begin{enumerate}
+    \item \textbf{Local Proxy Startup}: The proxy client (Xray) must start and bind to local ports (SOCKS5, HTTP).
+    \item \textbf{Port Readiness Check}: Verify the local proxy ports are actually listening before attempting connections.
+    \item \textbf{Outbound Connection}: The proxy client attempts to connect to the remote proxy server (VMess/Shadowsocks endpoint).
+    \item \textbf{Test Request}: An HTTP/HTTPS request is made through the local proxy to verify end-to-end connectivity.
+\end{enumerate}
+
+\subsection{Common Proxy Testing Issues}
+
+\subsubsection{Issue: "Proxy Server Unreachable"}
+
+\textbf{Symptom}: When testing through SOCKS5 proxy, you get "socks connect error: Proxy server unreachable".
+
+\textbf{Diagnosis Steps}:
+\begin{enumerate}
+    \item \textbf{Check if proxy process started}: Verify Xray process is running (PID check).
+    \item \textbf{Verify port is listening}: Attempt TCP connection to localhost:port (e.g., 127.0.0.1:1080 for SOCKS5).
+    \item \textbf{Timing issue}: The proxy may need time to initialize. Wait with exponential backoff (200ms, 400ms, 600ms, etc.).
+    \item \textbf{Port conflict}: Another application may be using the port. Check with \texttt{netstat} or \texttt{ss}.
+\end{enumerate}
+
+\textbf{Solution}: Implement port readiness checks before testing. In Smart Relay, we check if the SOCKS port accepts TCP connections before attempting HTTP requests through it.
+
+\textbf{Code Pattern}:
+\begin{verbatim}
+// Wait for proxy to be ready
+for attempt in 0..10 {
+    sleep(200ms * (attempt + 1));
+    if port_is_listening("127.0.0.1", socks_port) {
+        break; // Proxy is ready
+    }
+}
+\end{verbatim}
+
+\subsubsection{Issue: "Path / was not found" (404 JSON Errors)}
+
+\textbf{Symptom}: HTTP proxy returns JSON error: \texttt{\{"code":404,"message":"path / was not found"\}}.
+
+\textbf{Root Cause}: When the remote proxy server (VMess/Shadowsocks endpoint) is unreachable, Xray's HTTP proxy cannot forward requests. Instead of returning a proper HTTP error, it may return JSON error responses.
+
+\textbf{Diagnosis}:
+\begin{itemize}
+    \item The local proxy (Xray) is working (accepting connections).
+    \item The outbound connection to the remote server fails.
+    \item Xray returns error responses instead of forwarding HTTP requests.
+\end{itemize}
+
+\textbf{Solution}: 
+\begin{enumerate}
+    \item Use SOCKS5 proxy instead of HTTP proxy for testing (more reliable).
+    \item Detect JSON error responses and provide clear error messages.
+    \item Test multiple endpoints to distinguish local vs remote issues.
+\end{enumerate}
+
+\subsubsection{Issue: Connection Timeout to Remote Server}
+
+\textbf{Symptom}: Local proxy works, but connections to remote proxy server timeout.
+
+\textbf{Diagnosis Steps}:
+\begin{enumerate}
+    \item \textbf{DNS Resolution}: Can you resolve the hostname? Use \texttt{nslookup} or \texttt{dig}.
+    \item \textbf{Direct TCP Test}: Try connecting directly to the remote server's IP:port (bypassing proxy).
+    \item \textbf{Routing Check}: Use \texttt{traceroute} or \texttt{ping} to see where packets are dropped.
+    \item \textbf{Firewall Check}: The remote server's firewall may be blocking your IP or the port.
+\end{enumerate}
+
+\textbf{Common Causes}:
+\begin{itemize}
+    \item Remote server is down or overloaded.
+    \item Firewall blocking connections (silent drop = timeout, RST = connection refused).
+    \item Network routing issues (packets not reaching destination).
+    \item Geographic restrictions (server blocks certain regions).
+    \item Protocol mismatch (server requires specific handshake, not plain TCP).
+\end{itemize}
+
+\subsection{Best Practices for Proxy Testing}
+
+\subsubsection{Use SOCKS5 for Testing}
+
+SOCKS5 proxy is more reliable than HTTP proxy for connectivity testing:
+\begin{itemize}
+    \item SOCKS5 operates at a lower layer (Layer 5), closer to TCP.
+    \item Less prone to HTTP-specific error handling issues.
+    \item Better error reporting when outbound connections fail.
+    \item Standard practice in proxy clients (v2rayN, Clash, etc.).
+\end{itemize}
+
+\subsubsection{Test URL Selection}
+
+Use reliable, well-known test endpoints:
+\begin{itemize}
+    \item \texttt{https://www.google.com/generate_204} - Google's connectivity check (returns 204 No Content).
+    \item \texttt{https://www.gstatic.com/generate_204} - Google static resources (backup).
+    \item \texttt{https://www.apple.com/library/test/success.html} - Apple test page.
+    \item \texttt{http://www.msftconnecttest.com/connecttest.txt} - Microsoft connectivity test.
+\end{itemize}
+
+These endpoints are:
+\begin{itemize}
+    \item Highly available (rarely down).
+    \item Return predictable status codes (204, 200).
+    \item Support both HTTP and HTTPS.
+    \item Used by major proxy clients for compatibility.
+\end{itemize}
+
+\subsubsection{Port Readiness Verification}
+
+Always verify the proxy port is listening before testing:
+
+\begin{verbatim}
+// Pseudo-code for port check
+async fn check_port_listening(host: &str, port: u16) -> bool {
+    match timeout(1s, TcpStream::connect((host, port))).await {
+        Ok(Ok(_)) => true,  // Port is listening
+        _ => false,         // Port not ready or unreachable
+    }
+}
+\end{verbatim}
+
+\subsubsection{Error Message Clarity}
+
+Provide clear, actionable error messages:
+\begin{itemize}
+    \item Distinguish between local proxy issues vs remote server issues.
+    \item Include the endpoint address (host:port) in error messages.
+    \item Explain what the error means (e.g., "Remote proxy unreachable" vs "Local proxy not ready").
+    \item Suggest next steps (check firewall, verify endpoint, etc.).
+\end{itemize}
+
+\subsection{Network Diagnostic Tools}
+
+When troubleshooting proxy issues, use these tools:
+
+\begin{itemize}
+    \item \textbf{netstat / ss}: Check if ports are listening.
+    \begin{verbatim}
+    netstat -an | findstr :1080    # Windows
+    ss -tlnp | grep :1080          # Linux
+    \end{verbatim}
+    
+    \item \textbf{telnet / nc}: Test TCP connectivity.
+    \begin{verbatim}
+    telnet 127.0.0.1 1080          # Test local proxy
+    nc -zv remote-host 443         # Test remote server
+    \end{verbatim}
+    
+    \item \textbf{curl}: Test HTTP through proxy.
+    \begin{verbatim}
+    curl -x socks5://127.0.0.1:1080 https://www.google.com
+    \end{verbatim}
+    
+    \item \textbf{traceroute / tracert}: Check routing path.
+    \begin{verbatim}
+    traceroute remote-host         # Linux/Mac
+    tracert remote-host            # Windows
+    \end{verbatim}
+\end{itemize}
+
+\subsection{Summary: Proxy Testing Checklist}
+
+When a proxy test fails, check in this order:
+
+\begin{enumerate}
+    \item \textbf{Process Check}: Is the proxy process (Xray) running?
+    \item \textbf{Port Check}: Is the local proxy port (SOCKS5/HTTP) listening?
+    \item \textbf{Timing}: Did you wait long enough for the proxy to initialize?
+    \item \textbf{DNS}: Can you resolve the remote server's hostname?
+    \item \textbf{Direct Connection}: Can you connect directly to the remote server (bypassing proxy)?
+    \item \textbf{Routing}: Are packets reaching the remote server (traceroute)?
+    \item \textbf{Firewall}: Is a firewall blocking the connection?
+    \item \textbf{Protocol}: Does the remote server require a specific protocol handshake?
+\end{enumerate}
+
+Understanding these layers helps systematically diagnose proxy connectivity issues.
+
+\section{GeoIP and Routing Configuration}
+
+\subsection{What is GeoIP?}
+
+GeoIP databases (geoip.dat and geosite.dat) are essential files used by Xray for intelligent routing decisions. These files contain:
+
+\begin{itemize}
+    \item \textbf{geoip.dat}: IP address ranges mapped to countries and regions
+    \item \textbf{geosite.dat}: Domain names categorized by purpose (e.g., advertising, social media, government)
+\end{itemize}
+
+\subsection{Repercussions of Not Using GeoIP}
+
+When GeoIP files are not available, Xray cannot use certain routing features:
+
+\begin{enumerate}
+    \item \textbf{No Geo-based Routing}: Cannot route traffic based on destination country or region
+    \item \textbf{No Private IP Bypass}: Cannot automatically bypass proxy for local/private IP addresses (10.x.x.x, 192.168.x.x, etc.)
+    \item \textbf{No Domain-based Routing}: Cannot route specific domains (e.g., advertising domains) through different outbounds
+    \item \textbf{Simplified Routing Rules}: Must rely on simpler routing rules based on network type (TCP/UDP) or port numbers only
+\end{enumerate}
+
+\subsection{Impact on Performance and Functionality}
+
+\textbf{Performance Impact:}
+\begin{itemize}
+    \item \textbf{Minimal}: For basic proxy functionality, the absence of GeoIP has negligible performance impact
+    \item \textbf{Routing Efficiency}: Without GeoIP, all traffic goes through the proxy, including local network traffic that could be handled directly
+    \item \textbf{Bandwidth Usage}: Local/private IP traffic unnecessarily routed through proxy consumes bandwidth
+\end{itemize}
+
+\textbf{Functionality Impact:}
+\begin{itemize}
+    \item \textbf{Basic Proxy}: Works perfectly fine - all TCP/UDP traffic routes through the proxy
+    \item \textbf{Advanced Routing}: Cannot use country-based, domain-based, or IP-range-based routing rules
+    \item \textbf{Local Network Access}: Local network resources (NAS, printers, etc.) may be slower if routed through proxy
+\end{itemize}
+
+\subsection{When to Use GeoIP}
+
+GeoIP files are recommended when you need:
+
+\begin{itemize}
+    \item \textbf{Split Tunneling}: Route only specific countries/domains through proxy
+    \item \textbf{Local Network Access}: Direct access to local network resources without proxy overhead
+    \item \textbf{Ad Blocking}: Route advertising domains to a blackhole outbound
+    \item \textbf{Performance Optimization}: Reduce proxy load by routing local traffic directly
+\end{itemize}
+
+\subsection{Downloading GeoIP Files}
+
+GeoIP files are automatically downloaded when you download Xray through Smart-Relay. The files are stored alongside the Xray binary:
+
+\begin{verbatim}
+data/cores/xray/
+  ├── xray.exe (or xray)
+  ├── geoip.dat
+  └── geosite.dat
+\end{verbatim}
+
+If the files are missing, they can be manually downloaded from:
+\begin{itemize}
+    \item \textbf{geoip.dat}: \url{https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat}
+    \item \textbf{geosite.dat}: \url{https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat}
+\end{itemize}
+
+\subsection{Configuration Example with GeoIP}
+
+With GeoIP files available, you can use advanced routing rules:
+
+\begin{verbatim}
+{
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:category-ads"],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "ip": ["geoip:cn"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "proxy"
+      }
+    ]
+  }
+}
+\end{verbatim}
+
+Without GeoIP files, you must use simpler rules:
+
+\begin{verbatim}
+{
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "proxy"
+      }
+    ]
+  }
+}
+\end{verbatim}
+
+\subsection{Summary}
+
+For basic proxy functionality, GeoIP files are \textbf{optional but recommended}. They enable advanced routing features but are not required for simple proxy connections. Smart-Relay automatically downloads these files when installing Xray to provide the best experience.
+
