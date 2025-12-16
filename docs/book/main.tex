@@ -1,0 +1,54 @@
+\documentclass[11pt]{book}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{tikz}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xwatermark}
+\usepackage{eso-pic}
+\usepackage{transparent}
+\geometry{margin=1in}
+
+% Add watermark on every page
+\AddToShipoutPictureBG{%
+  \begin{tikzpicture}[remember picture,overlay]
+    % Diagonal watermark pattern
+    \foreach \x in {0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30}
+      \foreach \y in {0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30} {
+        \node[rotate=45,text=gray!15,font=\small] at (\x cm,\y cm) {Namelos.xyz};
+      }
+    % Large centered watermark
+    \node[rotate=45,text=gray!08,font=\Huge,anchor=center] at (current page.center) {Namelos.xyz};
+    % Corner watermarks
+    \node[text=gray!20,font=\tiny,anchor=north west] at (current page.north west) {Namelos.xyz};
+    \node[text=gray!20,font=\tiny,anchor=north east] at (current page.north east) {Namelos.xyz};
+    \node[text=gray!20,font=\tiny,anchor=south west] at (current page.south west) {Namelos.xyz};
+    \node[text=gray!20,font=\tiny,anchor=south east] at (current page.south east) {Namelos.xyz};
+  \end{tikzpicture}%
+}
+
+\title{Smart Relay: From Networking Basics to AI-Orchestrated VPNs}
+\author{tian.shao@namelos.xyz}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\input{chapters/01_networking_basics}
+\input{chapters/02_protocols_and_security}
+\input{chapters/02b_rust_for_networking}
+\input{chapters/03_proxy_and_vpn_clients}
+\input{chapters/03b_vpn_deep_dive}
+\input{chapters/04_ai_driven_design}
+\input{chapters/05_operations_and_deployment}
+\input{chapters/06_development_story}
+\input{chapters/07_gui_design}
+\input{chapters/08_xray_core_mathematics}
+\input{chapters/09_xray_architecture_and_integration}
+\input{chapters/10_vmess_vless_trojan_protocols}
+\input{chapters/appendix_commands}
+
+\end{document}
+

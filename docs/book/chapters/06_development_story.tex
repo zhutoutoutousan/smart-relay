@@ -1,0 +1,306 @@
+\chapter{Development Story and Lessons Learned}
+
+This chapter records how Smart Relay evolved and what decisions mattered. It captures the wisdom gained from building a production-ready AI-assisted proxy client with a modern GUI.
+
+\section{Milestones}
+\begin{itemize}
+    \item \textbf{Scaffold}: set up Rust workspace, Axum control plane, AI client, and config store.
+    \item \textbf{AI integration}: Ollama client with prompts that embed the live config snapshot.
+    \item \textbf{Validation}: added HTTP error mapping and config validation to avoid unsafe applies.
+    \item \textbf{GUI foundation}: Integrated \texttt{egui} for cross-platform native GUI with cyberpunk theme.
+    \item \textbf{Subscription parsing}: Implemented Base64 decoding and multi-protocol parsing (VMess, VLESS, Shadowsocks, Trojan, SOCKS5).
+    \item \textbf{System proxy integration}: Windows registry-based proxy configuration with Global/PAC mode support.
+    \item \textbf{Endpoint management}: Connection testing, batch operations, and right-click context menus.
+    \item \textbf{Internationalization}: Chinese character support with proper font configuration.
+    \item \textbf{Comprehensive network diagnostics}: Multi-layer testing (DNS, TCP, routing, packet-level analysis) with detailed error categorization.
+\end{itemize}
+
+\section{Design Choices}
+
+\subsection{Architecture}
+\begin{itemize}
+    \item Axum + Tokio for async control-plane tasks across platforms.
+    \item Serde + TOML for human-friendly config with easy round trips.
+    \item Adapter abstraction to decouple decision layer from core engines (xray, sing-box).
+    \item Library crate structure: separate binaries for CLI and GUI, shared core logic.
+    \item Immediate mode GUI (\texttt{egui}) for simplicity and cross-platform consistency.
+\end{itemize}
+
+\subsection{State Management}
+\begin{itemize}
+    \item \textbf{Config persistence}: TOML files in platform-specific config directories.
+    \item \textbf{Async GUI}: Tokio runtime injected into \texttt{eframe} for async operations.
+    \item \textbf{Channel-based communication}: \texttt{mpsc::channel} for passing async results to GUI thread.
+    \item \textbf{One-time initialization}: Font configuration and theme application done once per frame.
+\end{itemize}
+
+\section{Critical Lessons Learned}
+
+\subsection{Async Operations in Immediate Mode GUI}
+
+The biggest challenge was integrating async operations (network requests, endpoint testing) with \texttt{egui}'s immediate mode update loop. \textbf{Key insight}: \texttt{eframe} runs in a synchronous context, but async operations require a Tokio runtime.
+
+\textbf{Solution pattern}:
+\begin{verbatim}
+// In main.rs: Create runtime once
+let rt = Arc::new(Runtime::new().expect("Failed to create Tokio runtime"));
+
+// Pass to App
+app.set_runtime(rt.clone());
+
+// In App methods: Use rt.spawn() instead of tokio::spawn()
+let (tx, rx) = mpsc::channel();
+rt.spawn(async move {
+    let result = async_operation().await;
+    tx.send(result).unwrap();
+});
+
+// In update loop: Check for messages
+if let Ok(msg) = rx.try_recv() {
+    // Update UI state
+}
+\end{verbatim}
+
+\textbf{Lessons}:
+\begin{itemize}
+    \item Never call \texttt{tokio::spawn} directly from GUI code—always use the injected runtime.
+    \item Use channels (\texttt{mpsc}) to communicate between async tasks and GUI thread.
+    \item Process channel messages in the \texttt{update()} method using \texttt{try\_recv()} to avoid blocking.
+    \item Store receivers as \texttt{Option<mpsc::Receiver<T>>} in App state for processing across frames.
+\end{itemize}
+
+\subsection{Chinese Character Rendering}
+
+Initial implementation showed Chinese characters as rectangles. \textbf{Root cause}: \texttt{egui}'s default fonts don't include CJK glyphs.
+
+\textbf{Solutions tried}:
+\begin{enumerate}
+    \item \textbf{egui-chinese-font crate}: Automatic system font detection (works on most systems).
+    \item \textbf{Manual font loading}: Fallback to Windows system fonts (\texttt{C:\textbackslash Windows\textbackslash Fonts\textbackslash msyh.ttc}).
+    \item \textbf{Embedded fonts}: For maximum compatibility, embed Noto Sans CJK or similar.
+\end{enumerate}
+
+\textbf{Best practice}: Always test with actual Unicode content (subscription URLs with Chinese endpoint names) during development, not just ASCII.
+
+\subsection{Windows System Proxy Integration}
+
+Windows proxy configuration requires registry manipulation. \textbf{Key discovery}: Using \texttt{winreg} crate is more reliable than \texttt{netsh} commands.
+
+\textbf{Implementation pattern}:
+\begin{verbatim}
+use winreg::enums::*;
+use winreg::RegKey;
+
+let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+let internet_settings = hkcu.open_subkey_with_flags(
+    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+    KEY_WRITE,
+)?;
+
+// Global proxy
+internet_settings.set_value("ProxyEnable", &1u32)?;
+internet_settings.set_value("ProxyServer", &proxy_str)?;
+internet_settings.set_value("ProxyOverride", &exceptions)?;
+
+// PAC mode
+internet_settings.set_value("ProxyEnable", &0u32)?;
+internet_settings.set_value("AutoConfigURL", &pac_url)?;
+\end{verbatim}
+
+\textbf{Lessons}:
+\begin{itemize}
+    \item Registry writes require \texttt{KEY\_WRITE} permission.
+    \item Always provide user feedback when proxy changes are applied.
+    \item Disable proxy on disconnect to restore user's original settings.
+    \item Handle errors gracefully—proxy setup failures shouldn't crash the app.
+\end{itemize}
+
+\subsection{Subscription Parsing}
+
+Subscription URLs return Base64-encoded content with multiple proxy protocols. \textbf{Challenges}:
+\begin{itemize}
+    \item Base64 decoding can fail—always handle errors.
+    \item VMess JSON parsing requires handling multiple field names (\texttt{ps}, \texttt{name}, \texttt{remark}).
+    \item Some protocols (VLESS, Trojan) have complex URL schemes.
+    \item UTF-8 encoding must be preserved for Chinese endpoint names.
+\end{itemize}
+
+\textbf{Robust parsing pattern}:
+\begin{verbatim}
+// Try Base64 decode
+let decoded = general_purpose::STANDARD.decode(base64_part)
+    .map_err(|e| format!("Base64 decode failed: {}", e))?;
+
+// Convert to UTF-8
+let json_str = String::from_utf8(decoded)
+    .map_err(|e| format!("UTF-8 decode failed: {}", e))?;
+
+// Parse JSON with fallback field names
+let name = json.get("ps")
+    .or_else(|| json.get("name"))
+    .or_else(|| json.get("remark"))
+    .and_then(|v| v.as_str())
+    .unwrap_or("Unknown Server");
+\end{verbatim}
+
+\subsection{Endpoint Testing and Connection Management}
+
+Testing endpoints requires async TCP connections. \textbf{Pattern}:
+\begin{verbatim}
+pub async fn test_endpoint(host: &str, port: u16) -> Result<u64> {
+    let start = Instant::now();
+    match timeout(Duration::from_secs(5), 
+                  TcpStream::connect((host, port))).await {
+        Ok(Ok(_stream)) => Ok(start.elapsed().as_millis() as u64),
+        Ok(Err(e)) => Err(anyhow!("Connection failed: {}", e)),
+        Err(_) => Err(anyhow!("Connection timeout")),
+    }
+}
+\end{verbatim}
+
+\textbf{State management}:
+\begin{itemize}
+    \item Track testing state per endpoint (\texttt{testing: bool}).
+    \item Store results in endpoint struct (\texttt{latency: Option<u64>}).
+    \item Use visual indicators (spinner, color-coded latency).
+    \item Batch testing: spawn multiple tests concurrently using \texttt{futures::join\_all}.
+\end{itemize}
+
+\subsection{Right-Click Context Menus}
+
+\texttt{egui} doesn't have built-in context menus. \textbf{Solution}: Use \texttt{egui::Window} with fixed position.
+
+\textbf{Pattern}:
+\begin{verbatim}
+// Detect right-click
+if row_response.secondary_clicked() {
+    self.right_click_menu = Some((
+        row_response.interact_pointer_pos().unwrap(),
+        idx
+    ));
+}
+
+// Show menu window
+if let Some((pos, idx)) = self.right_click_menu {
+    egui::Window::new("context_menu")
+        .fixed_pos(pos)
+        .collapsible(false)
+        .title_bar(false)
+        .show(ui.ctx(), |ui| {
+            // Menu items
+        });
+}
+\end{verbatim}
+
+\section{What Worked Well}
+\begin{itemize}
+    \item Small prompts with explicit sections lead to clearer AI responses.
+    \item Early validation hooks prevented bad configs from reaching adapters.
+    \item Keeping the control plane stateless (config on disk) simplifies restart/upgrade.
+    \item \textbf{Channel-based async communication}: Clean separation between async tasks and GUI updates.
+    \item \textbf{Default trait implementations}: Using \texttt{Default} for struct initialization reduces boilerplate.
+    \item \textbf{Error handling}: Using \texttt{anyhow::Result} for error propagation simplifies debugging.
+    \item \textbf{Visual feedback}: Color-coded latency, connection indicators, and status messages improve UX.
+\end{itemize}
+
+\section{Common Pitfalls and Solutions}
+
+\subsection{Pitfall: "No reactor running" Error}
+\textbf{Symptom}: \texttt{thread 'main' panicked: there is no reactor running}.\\
+\textbf{Cause}: Calling \texttt{tokio::spawn} from non-async context.\\
+\textbf{Solution}: Create \texttt{Runtime} in \texttt{main.rs} and pass to GUI via \texttt{Arc<Runtime>}.
+
+\subsection{Pitfall: Moved Value Errors}
+\textbf{Symptom}: \texttt{error[E0382]: use of moved value}.\\
+\textbf{Cause}: Using a value in multiple async closures.\\
+\textbf{Solution}: Clone values before moving into closures:
+\begin{verbatim}
+let host_clone = host.clone();
+rt.spawn(async move {
+    test_endpoint(&host_clone, port).await;
+});
+\end{verbatim}
+
+\subsection{Pitfall: Font Configuration Not Applied}
+\textbf{Symptom}: Chinese characters show as rectangles.\\
+\textbf{Cause}: Fonts configured every frame, or default fonts don't support CJK.\\
+\textbf{Solution}: Configure fonts once in \texttt{main.rs} using \texttt{egui-chinese-font}, or load system fonts manually.
+
+\subsection{Pitfall: Grid Column Mismatch}
+\textbf{Symptom}: UI layout breaks when adding new columns.\\
+\textbf{Cause}: \texttt{num\_columns} doesn't match actual columns rendered.\\
+\textbf{Solution}: Always update \texttt{num\_columns} when modifying grid structure.
+
+\section{What to Improve Next}
+\begin{itemize}
+    \item Add schema-validated JSON outputs from AI to reduce parsing ambiguity.
+    \item Implement real adapters and probe-driven scoring loops.
+    \item Build integration tests for API endpoints and adapter lifecycles.
+    \item Add CI to run \texttt{cargo fmt/clippy/test} and LaTeX build checks.
+    \item \textbf{Test result persistence}: Store test results in config for faster UI updates.
+    \item \textbf{Connection pooling}: Reuse TCP connections for batch testing.
+    \item \textbf{Clipboard integration}: Copy endpoint URLs to clipboard from context menu.
+    \item \textbf{Export/Import}: Save endpoint lists as JSON for backup/sharing.
+\end{itemize}
+
+\section{Performance Considerations}
+
+\begin{itemize}
+    \item \textbf{Subscription parsing}: Large subscriptions (80+ endpoints) parse in \textasciitilde{}200ms—acceptable for one-time import.
+    \item \textbf{Endpoint testing}: 5-second timeout per endpoint; batch testing runs concurrently.
+    \item \textbf{GUI responsiveness}: All async operations are non-blocking; UI remains interactive.
+    \item \textbf{Memory}: Endpoint list stored in memory; consider pagination for 1000+ endpoints.
+\end{itemize}
+
+\subsection{Network Diagnostics and Deep Packet Analysis}
+
+One of the most challenging aspects was implementing comprehensive endpoint testing that provides actionable diagnostics. The initial implementation only tested basic TCP connectivity, but users needed to understand \textit{why} connections failed.
+
+\textbf{The Challenge:}
+\begin{itemize}
+    \item Simple TCP tests often fail even when endpoints work through proxies.
+    \item Users need to understand if failures are due to DNS, routing, firewalls, or protocol issues.
+    \item Different error types require different troubleshooting approaches.
+\end{itemize}
+
+\textbf{The Solution - Multi-Layer Testing:}
+\begin{enumerate}
+    \item \textbf{Layer 7 (DNS)}: Test hostname resolution first - if DNS fails, nothing else matters.
+    \item \textbf{Layer 3 (Routing)}: Check routing table and traceroute to understand network path.
+    \item \textbf{Layer 4 (TCP)}: Test TCP handshake with detailed packet flow analysis.
+    \item \textbf{Layer 2/3 (Packets)}: Provide packet-level details (TCP headers, flags, sequence numbers).
+    \item \textbf{Smart Testing}: Try multiple approaches (direct, via proxy, extended timeout).
+\end{enumerate}
+
+\textbf{Key Insights:}
+\begin{itemize}
+    \item \textbf{Connection Refused vs Timeout}: Refused means port is closed (RST received); timeout means no response (firewall dropping silently).
+    \item \textbf{Packet Flow Visualization}: Showing "SYN → (no response)" helps users understand firewall behavior.
+    \item \textbf{Error Categorization}: DNS failures, connection refused, timeouts, and network unreachable each require different fixes.
+    \item \textbf{Diagnostic Depth}: The more detailed the diagnostics, the easier it is for users (and AI) to diagnose issues.
+\end{itemize}
+
+\textbf{Implementation Details:}
+\begin{itemize}
+    \item Used \texttt{tokio::net::lookup\_host} for DNS resolution with timeout.
+    \item Used \texttt{tokio::net::TcpStream::connect} for TCP testing with configurable timeouts.
+    \item Integrated system commands (\texttt{ipconfig}, \texttt{route}, \texttt{tracert}) for routing information.
+    \item Created detailed diagnostic messages explaining packet flow and connection states.
+    \item Categorized errors to provide actionable feedback (e.g., "Firewall dropping silently" vs "Port closed").
+\end{itemize}
+
+This multi-layer approach provides the context needed to understand VPN connection issues, which is especially important when endpoints may work through proxies but fail direct connections.
+
+\section{Personal Checklist for Contributors}
+\begin{itemize}
+    \item Run \texttt{cargo test} before pushing changes.
+    \item Keep prompts and configs under version control to aid rollbacks.
+    \item Document decisions in \texttt{docs/dev\_story.md} to keep the narrative fresh.
+    \item \textbf{Test with real data}: Use actual subscription URLs, not mock data.
+    \item \textbf{Test on target platform}: Windows proxy features only work on Windows.
+    \item \textbf{Handle errors gracefully}: Never panic on user input or network errors.
+    \item \textbf{Provide feedback}: Show loading states, success messages, and error details.
+    \item \textbf{Understand network layers}: When debugging connection issues, think about which OSI layer is failing.
+    \item \textbf{Provide detailed diagnostics}: Users need context to understand why connections fail.
+\end{itemize}
+
